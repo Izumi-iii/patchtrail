@@ -218,3 +218,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# PatchTrail local state and browser artifacts
+.patchtrail/
+.test-artifacts/

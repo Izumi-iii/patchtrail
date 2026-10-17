@@ -1,0 +1,17 @@
+[project]
+name = "patchtrail"
+version = "0.1.0"
+description = "Independent Docker patch verifier and local conversation workbench"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.optional-dependencies]
+agent = [
+    "langchain>=1,<2",
+    "langchain-openai>=1,<2",
+    "langgraph>=1,<2",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"

@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="PatchTrail 本地代码修复工作台">
+  <title>PatchTrail · 代码修复工作台</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <button class="sidebar-backdrop" id="sidebar-backdrop" aria-label="关闭侧栏" hidden></button>
+  <aside class="sidebar" id="sidebar" aria-label="会话导航">
+    <a class="brand" href="/" aria-label="PatchTrail 首页"><span class="brand-mark">P<span>↗</span></span><span>PatchTrail<small>代码修复工作台</small></span></a>
+    <button class="new-chat" id="new-chat"><span aria-hidden="true">＋</span> 新建会话 <kbd>新任务</kbd></button>
+    <label class="search-box"><span aria-hidden="true">⌕</span><input id="search" type="search" placeholder="搜索会话" aria-label="搜索会话" autocomplete="off"></label>
+    <div class="section-label">最近会话 <span id="conversation-count">0</span></div>
+    <nav class="conversation-list" id="conversation-list" aria-label="历史会话"></nav>
+    <div class="sidebar-footer"><span class="status-dot"></span><div>本地工作空间<small>会话保存在这台电脑</small></div><span class="version">v0.1</span></div>
+  </aside>
+
+  <main class="workspace">
+    <header class="topbar">
+      <button class="icon-button menu-toggle" id="menu-toggle" aria-label="打开会话导航" aria-controls="sidebar" aria-expanded="false">☰</button>
+      <div class="heading"><span id="conversation-title">新会话</span><span class="preview-tag">开发预览</span></div>
+      <div class="topbar-actions">
+        <button class="plain-button" id="export-chat" title="导出会话 JSON">导出</button>
+        <button class="icon-button" id="rename-chat" aria-label="重命名会话" title="重命名会话">✎</button>
+        <button class="icon-button" id="delete-chat" aria-label="删除会话" title="删除会话">⌫</button>
+      </div>
+    </header>
+
+    <div class="capability-note"><span class="status-dot"></span><span>已接通会话与只读仓库检查。模型修复、补丁生成和测试执行尚未接入。</span></div>
+
+    <section class="chat-scroll" id="chat-scroll" aria-label="对话内容">
+      <div class="welcome" id="welcome">
+        <span class="eyebrow">从一个具体问题开始</span>
+        <h1>把问题说清楚，<br>让修复有迹可循。</h1>
+        <p>描述需要修复的行为，关联你的本地仓库。<br>先确认任务和工作区，再逐步接入代码分析与验证。</p>
+        <div class="suggestions">
+          <button class="suggestion" data-prompt="检查这个仓库的 Git 状态和 Python 测试文件。" data-mode="inspect"><span aria-hidden="true">⌘</span><strong>检查仓库</strong><small>查看提交、工作区与测试线索</small></button>
+          <button class="suggestion" data-prompt="我需要修复一个问题：\n复现步骤：\n当前行为：\n预期行为：" data-mode="note"><span aria-hidden="true">↗</span><strong>描述一个 Bug</strong><small>记录复现步骤和预期行为</small></button>
+          <button class="suggestion" data-prompt="这次修改需要保持以下兼容性要求：\n" data-mode="note"><span aria-hidden="true">≋</span><strong>补充任务约束</strong><small>明确修改范围与兼容性要求</small></button>
+        </div>
+      </div>
+      <div class="messages" id="messages" aria-label="消息列表"></div>
+      <div class="pending" id="pending" role="status" hidden><span class="spinner"></span><span id="pending-label">正在检查仓库…</span></div>
+    </section>
+
+    <div class="composer-area">
+      <button class="new-results" id="new-results" hidden>↓ 查看新消息</button>
+      <form class="composer" id="composer">
+        <label class="sr-only" for="message-input">任务描述</label>
+        <textarea id="message-input" rows="2" maxlength="12000" placeholder="描述问题、预期行为，或补充任务要求…"></textarea>
+        <div class="composer-toolbar">
+          <button class="repository-button" id="repository-button" type="button" title="设置本机 Git 仓库路径"><span aria-hidden="true">＋</span><span id="repository-label">关联仓库</span></button>
+          <div class="composer-right">
+            <label class="sr-only" for="mode-select">任务模式</label>
+            <select id="mode-select" aria-label="任务模式"><option value="inspect">仓库检查</option><option value="note">记录需求</option></select>
+            <button class="send-button" id="send" type="submit" aria-label="发送任务" disabled>↑</button>
+          </div>
+        </div>
+      </form>
+      <div class="composer-footer"><span id="connection-status" role="status">正在连接本地服务…</span><span>Enter 发送 · Shift + Enter 换行</span></div>
+    </div>
+  </main>
+
+  <dialog id="repository-dialog" aria-labelledby="repository-dialog-title">
+    <form id="repository-form">
+      <div class="dialog-header"><h2 id="repository-dialog-title">关联本地仓库</h2><button type="button" class="icon-button" data-close-dialog aria-label="关闭仓库设置">×</button></div>
+      <p>填写这台电脑上 Git 仓库根目录的绝对路径。当前版本只读取 Git 信息，不运行仓库代码。</p>
+      <label for="repository-path">仓库路径</label>
+      <input id="repository-path" maxlength="2048" placeholder="例如 D:\projects\my-python-app" autocomplete="off" spellcheck="false">
+      <small>留空并保存可以解除关联。保存路径后，在对话中发送任务进行检查。</small>
+      <div class="dialog-actions"><button type="button" class="plain-button" data-close-dialog>取消</button><button class="primary-button" id="save-repository" type="submit">保存路径</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="rename-dialog" aria-labelledby="rename-dialog-title">
+    <form id="rename-form">
+      <div class="dialog-header"><h2 id="rename-dialog-title">重命名会话</h2><button type="button" class="icon-button" data-close-dialog aria-label="关闭重命名">×</button></div>
+      <label for="rename-input">会话名称</label><input id="rename-input" maxlength="100" required>
+      <div class="dialog-actions"><button type="button" class="plain-button" data-close-dialog>取消</button><button class="primary-button" type="submit">保存</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="delete-dialog" aria-labelledby="delete-dialog-title">
+    <form id="delete-form">
+      <div class="dialog-header"><h2 id="delete-dialog-title">删除这个会话？</h2><button type="button" class="icon-button" data-close-dialog aria-label="关闭删除确认">×</button></div>
+      <p>将删除该会话及其消息记录。仓库文件不会受到影响。</p>
+      <div class="dialog-actions"><button type="button" class="plain-button" data-close-dialog autofocus>保留会话</button><button class="danger-button" type="submit">确认删除</button></div>
+    </form>
+  </dialog>
+  <div class="toast" id="toast" role="alert" hidden></div>
+</body>
+</html>
