@@ -52,7 +52,7 @@ async function run() {
     await page.waitForFunction(() => !document.getElementById('new-chat').disabled);
     assert.equal(await page.locator('#welcome').isVisible(), true);
     assert.equal(await page.locator('#send').isDisabled(), true);
-    assert.match(await page.locator('.capability-note').textContent(), /尚未接入/);
+    assert.match(await page.locator('.capability-note').textContent(), /修复|配置/);
     await page.screenshot({ path: path.join(output, 'desktop.png'), fullPage: true });
     checks.push('welcome and honest capability status');
 
@@ -71,7 +71,7 @@ async function run() {
     assert.equal(await page.locator('.message.user .message-content').textContent(), unsafeText);
     assert.equal(await page.locator('.message-content img').count(), 0);
     assert.equal(await page.evaluate(() => window.injected), undefined);
-    assert.equal(await page.locator('.message-preview-label').textContent(), '工作台预览 · 未调用模型');
+    assert.equal(await page.locator('.message-preview-label').textContent(), '只读操作 · 未调用模型');
     checks.push('IME and multiline input; stored text cannot execute HTML');
 
     await page.reload({ waitUntil: 'networkidle' });

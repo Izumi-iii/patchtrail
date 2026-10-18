@@ -24,13 +24,19 @@ def register_path(name, seen):
         seen[folded] = prefix
 
 
-def git(directory, *args, check=True):
+def git(directory, *args, check=True, isolated=False):
     env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     env.update(GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0")
+    options = []
+    if isolated:
+        # Isolated replay must preserve bytes, regardless of the host's Windows Git settings.
+        env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+        options = ["-c", "core.autocrlf=false", "-c", "core.safecrlf=false",
+                   "-c", "core.attributesFile=" + os.devnull]
     try:
         result = subprocess.run(
             ["git", "--no-optional-locks", "-c", "core.fsmonitor=false",
-             "-c", "core.hooksPath=", "-C", str(directory), *args],
+             "-c", "core.hooksPath=", *options, "-C", str(directory), *args],
             capture_output=True, timeout=30, env=env,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except (OSError, subprocess.TimeoutExpired) as exc:
@@ -185,14 +191,14 @@ def apply_candidate(base, candidate, patch_path, task):
         if source.is_file() and b"\r\n" in source.read_bytes():
             raise VerificationError("CONFIG_ERROR", "unsupported_source_newlines",
                                     "Editable committed source must use LF newlines in this release.")
-    git(candidate, "init", "--quiet", "--template=")
+    git(candidate, "init", "--quiet", "--template=", isolated=True)
     normalized = candidate / ".git" / "patchtrail-input.patch"
     normalized.write_bytes(patch_bytes.replace(b"\r\n", b"\n"))
-    checked = git(candidate, "apply", "--check", "--whitespace=error", str(normalized), check=False)
+    checked = git(candidate, "apply", "--check", "--whitespace=error", str(normalized), check=False, isolated=True)
     if checked.returncode:
         raise VerificationError("REPAIR_FAILED", "patch_does_not_apply",
                                 checked.stderr.decode("utf-8", errors="replace")[-2000:])
-    applied = git(candidate, "apply", "--whitespace=error", str(normalized), check=False)
+    applied = git(candidate, "apply", "--whitespace=error", str(normalized), check=False, isolated=True)
     if applied.returncode:
         raise VerificationError("REPAIR_FAILED", "patch_apply_failed", "Git could not apply candidate.")
     after = manifest(candidate)

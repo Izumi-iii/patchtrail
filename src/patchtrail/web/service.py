@@ -82,12 +82,12 @@ def prepare_answer(content, repository_path, mode):
             "tests_executed": False, "mode": mode}
     if mode == "note":
         return ("需求已保存到这个会话。\n\n"
-                "当前是 Web 工作台预览，尚未接入语言模型、补丁生成和测试执行。"
-                "你可以继续补充复现步骤、预期行为和需要保留的兼容性要求。", base)
+                "这条消息只记录需求，没有调用模型或执行测试。"
+                "补充复现步骤与预期行为后，可切换「修复任务」并确认修复设置。", base)
     if not repository_path:
         return ("任务已保存。请先通过输入框旁的「关联仓库」填写本机 Git 仓库的绝对路径，"
                 "再发送任务以检查仓库。\n\n"
-                "当前仅支持真实的只读仓库检查；模型修复与测试沙盒尚未接入。",
+                "本次为只读仓库检查；要生成补丁，请切换「修复任务」并配置任务来源。",
                 {**base, "status": "needs_repository"})
     repository = inspect_repository(repository_path)
     metadata = {**base, "repository": repository, "status": repository["status"]}
@@ -105,24 +105,38 @@ def prepare_answer(content, repository_path, mode):
                     "本次检查没有修改或提交任何文件。"]
     else:
         details += ["", "Git 工作区干净；这只通过了工作区检查，尚未验证依赖、测试或沙盒。"]
-    details += ["", "你的需求已记录。下一阶段将接入代码定位、LangGraph 修复流程与独立验证；"
-                "本次没有调用模型、生成补丁或执行测试。"]
+    details += ["", "本次没有调用模型、生成补丁或执行测试。要执行修复，请切换「修复任务」并确认任务与测试设置。"]
     return "\n".join(details), metadata
 
 
 class Workbench:
-    def __init__(self, store):
+    def __init__(self, store, jobs=None):
         self.store = store
+        self.jobs = jobs
         self._lock = threading.Lock()
         self._busy = set()
+        self._job_locks = {}
 
     def _enter(self, conversation_id):
         with self._lock:
             if conversation_id in self._busy:
                 raise RequestError("这个会话正在处理请求，请稍后再试。", 409)
             self._busy.add(conversation_id)
+        if self.jobs:
+            from .jobs import execution_lock
+            context = execution_lock(self.jobs.root)
+            try:
+                context.__enter__()
+                self._job_locks[conversation_id] = context
+                self.jobs.ensure_idle(conversation_id)
+            except Exception:
+                self._leave(conversation_id)
+                raise
 
     def _leave(self, conversation_id):
+        context = self._job_locks.pop(conversation_id, None)
+        if context:
+            context.__exit__(None, None, None)
         with self._lock:
             self._busy.discard(conversation_id)
 
@@ -147,6 +161,8 @@ class Workbench:
             self._leave(conversation_id)
 
     def send(self, conversation_id, data):
+        if data.get("mode") == "repair" and self.jobs:
+            return self.jobs.submit(conversation_id, data)
         content = text_field(data, "content", 12000, required=True)
         request_id = text_field(data, "request_id", 80, required=True)
         if not re.fullmatch(r"[a-zA-Z0-9_-]+", request_id):

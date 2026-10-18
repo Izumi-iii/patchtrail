@@ -5,6 +5,7 @@ const state = {
   conversations: [], active: null, drafts: new Map(), pending: new Map(),
   loadVersion: 0, loadController: null, ready: false, creating: false,
   toastTimer: null, dialogTarget: null, listVersion: 0, cache: new Map(), retries: new Map(),
+  jobs: new Map(), reviewed: new Map(), jobActions: new Set(), polling: false, modelReady: false,
 };
 
 function remember(id) {
@@ -62,7 +63,7 @@ function renderList() {
     title.className = "item-title";
     title.textContent = item.title;
     button.append(icon, title);
-    if (state.pending.has(item.id)) {
+    if (state.pending.has(item.id) || conversationBusy(item.id)) {
       const busy = document.createElement("span");
       busy.className = "spinner item-busy";
       busy.setAttribute("aria-label", "处理中");
@@ -142,13 +143,17 @@ function messageNode(message) {
   header.append(name);
   if (message.role === "assistant") {
     const label = document.createElement("span"); label.className = "message-preview-label";
-    label.textContent = "工作台预览 · 未调用模型";
+    label.textContent = message.metadata?.kind === "agent_job" ? "修复工作流" : "只读操作 · 未调用模型";
     header.append(label);
   }
   const content = document.createElement("div"); content.className = "message-content";
   // All model/user/repository text stays text, never HTML.
   content.textContent = message.content;
   article.append(header, content);
+  if (message.metadata?.kind === "agent_job") {
+    const job = (state.jobs.get(message.conversation_id) || []).find((item) => item.id === message.metadata.job_id);
+    if (job) article.append(jobCard(job));
+  }
   if (message.metadata?.repository) article.append(repositoryDetails(message.metadata.repository));
   if (message.role === "assistant") {
     const actions = document.createElement("div"); actions.className = "message-actions";
@@ -164,11 +169,11 @@ function messageNode(message) {
 }
 
 function updateControls() {
-  const busy = state.active && state.pending.has(state.active.id);
+  const busy = state.active && (state.pending.has(state.active.id) || conversationBusy(state.active.id));
   $("send").disabled = !state.ready || !state.active || busy || !$("message-input").value.trim();
   $("message-input").disabled = !state.ready || !state.active || busy;
   $("mode-select").disabled = !state.ready || busy;
-  for (const id of ["repository-button", "rename-chat", "delete-chat", "export-chat"]) {
+  for (const id of ["repository-button", "rename-chat", "delete-chat", "export-chat", "task-settings"]) {
     $(id).disabled = !state.ready || !state.active || busy;
   }
   $("new-chat").disabled = !state.ready || state.creating;
@@ -183,8 +188,10 @@ function renderConversation({ bottom = false } = {}) {
   $("welcome").hidden = messages.length > 0;
   $("messages").replaceChildren(...messages.map(messageNode));
   $("pending").hidden = !pending;
-  $("pending-label").textContent = pending?.mode === "note" ? "正在保存需求…" : "正在检查仓库…";
+  $("pending-label").textContent = pending?.mode === "note" ? "正在保存需求…" : pending?.mode === "repair" ? "正在提交修复任务…" : "正在检查仓库…";
   const repo = active?.repository_path || "";
+  $("task-hint").textContent = active?.task_source === "file" ?
+    `任务文件：${active.task_path} · 最多 8 次模型请求、2 个候选 · 可能产生模型费用` : "退款示例（每次独立仓库）· 最多 8 次模型请求、2 个候选 · 可能产生模型费用";
   $("repository-label").textContent = repo ? repo.split(/[\\/]/).filter(Boolean).at(-1) || repo : "关联仓库";
   $("repository-button").title = repo || "设置本机 Git 仓库路径";
   $("repository-button").classList.toggle("connected", Boolean(repo));
@@ -208,6 +215,7 @@ async function selectConversation(id) {
     remember(id);
     $("message-input").value = state.drafts.get(id) || "";
     renderConversation({ bottom: true });
+    await refreshJobs();
     setSidebar(false);
   } catch (error) {
     if (error.name !== "AbortError" && version === state.loadVersion) toast(error.message, true);
@@ -269,7 +277,7 @@ async function sendMessage(event) {
 }
 
 function showDialog(id) {
-  if (!state.active || state.pending.has(state.active.id)) return;
+  if (!state.active || state.pending.has(state.active.id) || conversationBusy(state.active.id)) return;
   state.dialogTarget = state.active.id;
   $(id).showModal();
 }
@@ -337,6 +345,19 @@ bindForm("repository-form", async (id) => {
   await patchConversation(id, { repository_path: $("repository-path").value.trim() });
   $("repository-dialog").close(); toast("仓库路径已保存。发送任务即可检查。");
 });
+$("task-settings").addEventListener("click", () => {
+  $("task-source").value = state.active?.task_source || "demo";
+  $("task-path").value = state.active?.task_path || "";
+  showDialog("task-dialog");
+});
+bindForm("task-form", async (id) => {
+  const result = await api(`/api/conversations/${id}/task`, { method: "POST", body: {
+    task_source: $("task-source").value, task_path: $("task-path").value.trim(),
+  }});
+  upsertConversation(result);
+  if (state.active?.id === id) { state.active = result; renderConversation(); }
+  $("task-dialog").close(); toast("任务设置已保存");
+});
 bindForm("rename-form", async (id) => {
   await patchConversation(id, { title: $("rename-input").value.trim() });
   $("rename-dialog").close();
@@ -367,7 +388,10 @@ $("export-chat").addEventListener("click", () => {
 async function boot() {
   updateControls(); setSidebar(false);
   try {
-    await api("/api/healthz");
+    const health = await api("/api/healthz");
+    state.modelReady = health.model.configured;
+    $("model-label").textContent = health.model.model || "模型未配置";
+    if (!state.modelReady) $("capability-text").textContent = "本机模型密钥尚未配置；仍可记录需求和只读检查仓库。";
     await refreshList();
     state.ready = true;
     $("connection-status").textContent = "本地服务已连接 · 需求与记录自动保存";
@@ -383,3 +407,119 @@ async function boot() {
 }
 
 boot();
+
+const activeStates = new Set(["QUEUED", "RUNNING", "STOP_REQUESTED"]);
+const jobLabels = { QUEUED: "准备中", RUNNING: "正在修复", STOP_REQUESTED: "等待当前步骤结束后暂停",
+  SUSPENDED: "已暂停", INTERRUPTED: "执行进程已中断", RECOVERY_REQUIRED: "需要恢复",
+  WAITING_APPROVAL: "验收通过 · 待审批", APPROVED: "已批准 · 待应用", REJECTED: "已拒绝",
+  APPLIED: "补丁已应用", FAILED: "未通过验收", EXPIRED: "审批已过期", INVALIDATED: "审批已失效",
+  APPLYING: "正在应用", };
+const nodeLabels = { prepare: "准备仓库与基准测试", model: "模型分析与工具规划", tools: "执行代码工具",
+  feedback: "运行反馈测试", final_verification: "最终独立验收" };
+
+function conversationBusy(id) {
+  return (state.jobs.get(id) || []).some((job) => activeStates.has(job.state));
+}
+
+function jobCard(job) {
+  const card = document.createElement("section"); card.className = "job-card";
+  card.dataset.jobId = job.id; card.dataset.state = job.state;
+  const title = document.createElement("strong"); title.textContent = jobLabels[job.state] || job.state;
+  card.append(title);
+  const stage = document.createElement("p");
+  const requested = Math.max(0, ...job.timeline.filter(e => e.kind === "model_requested").map(e => e.call || 0));
+  const modelCalls = Math.max(job.progress?.model_calls || 0, job.usage?.model_calls || 0, requested);
+  const candidates = Math.max(job.progress?.candidate_count || 0, job.usage?.candidate_count || 0);
+  stage.textContent = `${nodeLabels[job.progress?.node] || "等待后台进度"} · 模型请求 ${modelCalls}/8 · 候选 ${candidates}/2`;
+  card.append(stage);
+  const target = document.createElement("p"); target.className = "job-target";
+  target.textContent = `目标仓库：${job.repository_path}`; card.append(target);
+  if (job.error_code && ["FAILED", "RECOVERY_REQUIRED", "INTERRUPTED"].includes(job.state)) {
+    const error = document.createElement("p"); error.className = "job-error";
+    error.textContent = `${job.error_code}${job.error ? `：${job.error}` : ""}`; card.append(error);
+  }
+  if (job.verification) {
+    const checks = document.createElement("div"); checks.className = "job-checks";
+    const labels = { candidate_regression: "回归测试", candidate_feedback: "修复测试", candidate_holdout: "保留集验收" };
+    for (const [key, label] of Object.entries(labels)) {
+      const check = job.verification.stages[key];
+      if (!check) continue;
+      const row = document.createElement("span"); row.textContent = `${check.valid && check.passed ? "✓" : "✕"} ${label}`;
+      checks.append(row);
+    }
+    card.append(checks);
+  }
+  const timeline = document.createElement("div"); timeline.className = "job-timeline";
+  for (const event of job.timeline.slice(-4)) {
+    const line = document.createElement("div");
+    const toolLabels = { read_file: "读取源码", list_files: "查看源码目录", find_symbol: "定位函数", search_code: "搜索代码", edit_files: "生成候选补丁", submit_candidate: "提交候选验证" };
+    const eventLabels = { run_finished: "本次执行结束", run_resumed: "继续上次执行", model_received: "模型响应已保存", interrupted_verifier_cleaned: "已清理中断的测试环境", unknown_model_retry_authorized: "已明确重试上一请求" };
+    line.textContent = event.node ? `${nodeLabels[event.node] || "执行步骤"} · ${event.kind === "node_started" ? "开始" : event.kind === "node_replayed" ? "从记录恢复" : "完成"}` :
+      event.kind === "model_requested" ? `模型请求 #${event.call}` : event.name ? (toolLabels[event.name] || "执行代码工具") : (eventLabels[event.kind] || "状态已更新");
+    timeline.append(line);
+  }
+  card.append(timeline);
+  const actions = document.createElement("div"); actions.className = "job-actions";
+  function button(label, callback, disabled = false) {
+    const b = document.createElement("button"); b.type = "button"; b.className = "plain-button"; b.textContent = label;
+    b.disabled = disabled || state.jobActions.has(job.id); b.addEventListener("click", callback); actions.append(b);
+  }
+  if (activeStates.has(job.state)) button("暂停执行", () => jobAction(job, "pause"), job.state === "STOP_REQUESTED");
+  if (["SUSPENDED", "INTERRUPTED", "RECOVERY_REQUIRED"].includes(job.state) && !job.approval) {
+    if (job.error_code === "model_outcome_unknown") {
+      const note = document.createElement("p"); note.textContent = "上一请求的结果和费用未知。重试将新增一次请求，原请求仍占用预算。"; card.append(note);
+      button("明确重试模型请求", () => jobAction(job, "retry_unknown"));
+    } else button("继续执行", () => jobAction(job, "resume"));
+  }
+  if (job.approval) {
+    button("查看补丁", () => showDiff(job));
+    if (job.state === "WAITING_APPROVAL") {
+      button("批准补丁", () => jobAction(job, "approve"), state.reviewed.get(job.id) !== job.approval.binding_sha256);
+      button("拒绝补丁", () => jobAction(job, "reject"));
+    }
+    if (job.state === "APPROVED") button("应用已批准补丁", () => jobAction(job, "apply"));
+    if (["APPLYING", "RECOVERY_REQUIRED"].includes(job.state)) button("恢复补丁应用", () => jobAction(job, "recover_apply"));
+  }
+  card.append(actions);
+  return card;
+}
+
+async function showDiff(job) {
+  try {
+    const result = await api(`/api/jobs/${job.id}/diff`);
+    $("diff-target").textContent = `目标：${result.repository_path}`;
+    $("diff-identity").textContent = `基准 ${result.base_commit}\n补丁 SHA-256 ${result.patch_sha256}`;
+    $("diff-content").textContent = result.diff;
+    state.reviewed.set(job.id, result.binding_sha256);
+    $("diff-dialog").showModal(); renderConversation();
+  } catch (error) { toast(error.message, true); }
+}
+
+async function jobAction(job, action) {
+  if (state.jobActions.has(job.id)) return;
+  state.jobActions.add(job.id); renderConversation();
+  try {
+    await api(`/api/jobs/${job.id}/actions`, { method: "POST", body: { action, binding: job.approval?.binding_sha256 || "" } });
+    await refreshJobs();
+  } catch (error) { toast(error.message, true); }
+  finally { state.jobActions.delete(job.id); if (state.active?.id === job.conversation_id) renderConversation(); }
+}
+
+async function refreshJobs() {
+  const id = state.active?.id;
+  if (!id || !state.ready || state.polling) return;
+  state.polling = true;
+  try {
+    const data = await api(`/api/conversations/${id}/jobs`);
+    const previous = JSON.stringify(state.jobs.get(id));
+    state.jobs.set(id, data.jobs);
+    if (state.active?.id === id && JSON.stringify(data.jobs) !== previous) {
+      const conversation = await api(`/api/conversations/${id}`);
+      if (state.active?.id !== id) return;
+      const bottom = nearBottom(); state.active = conversation; state.cache.set(id, conversation);
+      renderConversation({ bottom });
+    }
+  } catch { /* A transient connection loss keeps the existing task cards visible. */ }
+  finally { state.polling = false; }
+}
+setInterval(refreshJobs, 1500);

@@ -44,6 +44,23 @@ class DockerBackend:
                 "repo_digests": info.get("RepoDigests", []),
                 "os": info["Os"], "architecture": info.get("Architecture")}
 
+    def cleanup_run(self, run_id):
+        """Remove only containers independently confirmed to carry this run label."""
+        if not re.fullmatch(r"verify-[a-f0-9]{32}", run_id):
+            raise VerificationError("RECOVERY_REQUIRED", "invalid_cleanup_identity", "Invalid verifier run ID.")
+        label = "io.patchtrail.run=" + run_id
+        rows = self.command(["ps", "--all", "--quiet", "--no-trunc", "--filter", "label=" + label])
+        identities = rows.stdout.decode().split()
+        if len(identities) > 30:
+            raise VerificationError("RECOVERY_REQUIRED", "cleanup_limit", "Too many interrupted run containers.")
+        for cid in identities:
+            if not re.fullmatch(r"[a-f0-9]{64}", cid):
+                raise VerificationError("RECOVERY_REQUIRED", "invalid_container_id", "Invalid cleanup container ID.")
+            item = json.loads(self.command(["inspect", cid]).stdout)[0]
+            if item.get("Id") != cid or item.get("Config", {}).get("Labels", {}).get("io.patchtrail.run") != run_id:
+                raise VerificationError("RECOVERY_REQUIRED", "cleanup_owner_changed", "Container ownership differs.")
+            self.command(["rm", "--force", cid])
+
     def run(self, source, suite, task, run_id, phase, artifact_dir):
         if self.image_id is None:
             raise VerificationError("SYSTEM_ERROR", "unresolved_image", "Resolve the image first.")

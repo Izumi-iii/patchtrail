@@ -23,7 +23,7 @@
   <main class="workspace">
     <header class="topbar">
       <button class="icon-button menu-toggle" id="menu-toggle" aria-label="打开会话导航" aria-controls="sidebar" aria-expanded="false">☰</button>
-      <div class="heading"><span id="conversation-title">新会话</span><span class="preview-tag">开发预览</span></div>
+      <div class="heading"><span id="conversation-title">新会话</span><span class="preview-tag" id="model-label">代码修复 Agent</span></div>
       <div class="topbar-actions">
         <button class="plain-button" id="export-chat" title="导出会话 JSON">导出</button>
         <button class="icon-button" id="rename-chat" aria-label="重命名会话" title="重命名会话">✎</button>
@@ -31,15 +31,15 @@
       </div>
     </header>
 
-    <div class="capability-note"><span class="status-dot"></span><span>已接通会话与只读仓库检查。模型修复、补丁生成和测试执行尚未接入。</span></div>
+    <div class="capability-note"><span class="status-dot"></span><span id="capability-text">修复在独立工作区验证，通过后由你审批。发送修复任务会调用配置的模型。</span></div>
 
     <section class="chat-scroll" id="chat-scroll" aria-label="对话内容">
       <div class="welcome" id="welcome">
         <span class="eyebrow">从一个具体问题开始</span>
-        <h1>把问题说清楚，<br>让修复有迹可循。</h1>
-        <p>描述需要修复的行为，关联你的本地仓库。<br>先确认任务和工作区，再逐步接入代码分析与验证。</p>
+        <h1>今天，要修复什么问题？</h1>
+        <p>描述预期行为，让代码修改和测试结果都有据可查。<br>可以先试退款示例，也可以配置自己的修复任务。</p>
         <div class="suggestions">
-          <button class="suggestion" data-prompt="检查这个仓库的 Git 状态和 Python 测试文件。" data-mode="inspect"><span aria-hidden="true">⌘</span><strong>检查仓库</strong><small>查看提交、工作区与测试线索</small></button>
+          <button class="suggestion" data-prompt="修复退款金额：应该退还原价减去优惠金额，保持无优惠时的行为。请先定位代码，再修改并验证。" data-mode="repair"><span aria-hidden="true">↗</span><strong>试试退款修复</strong><small>在独立样例仓库中生成并验证补丁</small></button>
           <button class="suggestion" data-prompt="我需要修复一个问题：\n复现步骤：\n当前行为：\n预期行为：" data-mode="note"><span aria-hidden="true">↗</span><strong>描述一个 Bug</strong><small>记录复现步骤和预期行为</small></button>
           <button class="suggestion" data-prompt="这次修改需要保持以下兼容性要求：\n" data-mode="note"><span aria-hidden="true">≋</span><strong>补充任务约束</strong><small>明确修改范围与兼容性要求</small></button>
         </div>
@@ -57,11 +57,13 @@
           <button class="repository-button" id="repository-button" type="button" title="设置本机 Git 仓库路径"><span aria-hidden="true">＋</span><span id="repository-label">关联仓库</span></button>
           <div class="composer-right">
             <label class="sr-only" for="mode-select">任务模式</label>
-            <select id="mode-select" aria-label="任务模式"><option value="inspect">仓库检查</option><option value="note">记录需求</option></select>
+            <button class="plain-button" type="button" id="task-settings">修复设置</button>
+            <select id="mode-select" aria-label="任务模式"><option value="repair">修复任务</option><option value="inspect">仓库检查</option><option value="note">记录需求</option></select>
             <button class="send-button" id="send" type="submit" aria-label="发送任务" disabled>↑</button>
           </div>
         </div>
       </form>
+      <div class="task-hint" id="task-hint">退款示例 · 最多 8 次模型请求、2 个候选 · 批准前不修改目标文件</div>
       <div class="composer-footer"><span id="connection-status" role="status">正在连接本地服务…</span><span>Enter 发送 · Shift + Enter 换行</span></div>
     </div>
   </main>
@@ -69,12 +71,32 @@
   <dialog id="repository-dialog" aria-labelledby="repository-dialog-title">
     <form id="repository-form">
       <div class="dialog-header"><h2 id="repository-dialog-title">关联本地仓库</h2><button type="button" class="icon-button" data-close-dialog aria-label="关闭仓库设置">×</button></div>
-      <p>填写这台电脑上 Git 仓库根目录的绝对路径。当前版本只读取 Git 信息，不运行仓库代码。</p>
+      <p>填写本机 Git 仓库根目录，用于只读检查。修复自己的项目请在「修复设置」中指定任务文件和可信测试。</p>
       <label for="repository-path">仓库路径</label>
       <input id="repository-path" maxlength="2048" placeholder="例如 D:\projects\my-python-app" autocomplete="off" spellcheck="false">
       <small>留空并保存可以解除关联。保存路径后，在对话中发送任务进行检查。</small>
       <div class="dialog-actions"><button type="button" class="plain-button" data-close-dialog>取消</button><button class="primary-button" id="save-repository" type="submit">保存路径</button></div>
     </form>
+  </dialog>
+
+  <dialog id="task-dialog" aria-labelledby="task-dialog-title">
+    <form id="task-form">
+      <div class="dialog-header"><h2 id="task-dialog-title">修复任务设置</h2><button type="button" class="icon-button" data-close-dialog aria-label="关闭任务设置">×</button></div>
+      <p>示例可直接试用。真实项目需要任务文件指定基准提交、修改范围和可信测试；需求以本次发送的文字为准。</p>
+      <label for="task-source">任务来源</label>
+      <select id="task-source"><option value="demo">退款 Bug 示例（每次新建独立仓库）</option><option value="file">本机 TaskSpec JSON 文件</option></select>
+      <label for="task-path">任务文件绝对路径（示例无需填写）</label>
+      <input id="task-path" maxlength="2048" placeholder="例如 D:\projects\my-app\task.json" spellcheck="false">
+      <p class="task-cost">修复会调用本机配置的模型，可能产生费用。每个任务最多 8 次模型请求、2 个候选；密钥只从本机配置读取。</p>
+      <div class="dialog-actions"><button type="button" class="plain-button" data-close-dialog>取消</button><button class="primary-button" type="submit">保存设置</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="diff-dialog" aria-labelledby="diff-dialog-title" class="diff-dialog">
+    <div class="dialog-header"><h2 id="diff-dialog-title">审查候选补丁</h2><button type="button" class="icon-button" data-close-dialog aria-label="关闭补丁">×</button></div>
+    <p id="diff-target"></p><p id="diff-identity" class="mono"></p>
+    <pre id="diff-content" tabindex="0"></pre>
+    <div class="dialog-actions"><span>仅展示已通过独立验收的冻结补丁</span><button type="button" class="primary-button" data-close-dialog>完成查看</button></div>
   </dialog>
 
   <dialog id="rename-dialog" aria-labelledby="rename-dialog-title">

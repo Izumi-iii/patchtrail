@@ -3,7 +3,8 @@ import json
 from pathlib import Path, PurePosixPath
 
 from patchtrail.domain.task import VerificationError, safe_relative
-from patchtrail.workspace.snapshot import apply_candidate, digest, manifest, tree_hash
+from patchtrail.workspace.snapshot import allowed_source, apply_candidate, digest, manifest, tree_hash
+from .editing import file_diff
 
 
 def tool_schema(name, description, properties, required=()):
@@ -22,24 +23,39 @@ TOOLS = [
                  "end_line": {"type": "integer"}}, ["path"]),
     tool_schema("find_symbol", "Find Python function/class definitions with AST; dynamic references are not resolved.",
                 {"name": {"type": "string"}}, ["name"]),
-    tool_schema("propose_patch", "Apply a COMPLETE cumulative Git diff against the ORIGINAL base commit, not an incremental diff. No tests/commands execute.",
-                {"unified_diff": {"type": "string"}, "expected_tree_hash": {"type": "string"}},
-                ["unified_diff", "expected_tree_hash"]),
+    tool_schema("edit_files", "Atomically replace exact, uniquely matching text in current existing Python files. Read each file first for its SHA-256. The tool generates the COMPLETE cumulative Git patch; do not write diff headers or line counts.",
+                {"expected_tree_hash": {"type": "string"},
+                 "edits": {"type": "array", "minItems": 1, "maxItems": 30,
+                           "items": {"type": "object", "additionalProperties": False,
+                                     "properties": {key: {"type": "string"} for key in
+                                                    ("path", "expected_file_sha256", "old_text", "new_text")},
+                                     "required": ["path", "expected_file_sha256", "old_text", "new_text"]}}},
+                ["expected_tree_hash", "edits"]),
     tool_schema("submit_candidate", "Freeze current proposed candidate for independent feedback verification. This does not declare success.",
                 {"candidate_tree_sha256": {"type": "string"}}, ["candidate_tree_sha256"]),
 ]
 
+LEGACY_PATCH_TOOL = tool_schema(
+    "propose_patch", "Legacy direct-call patch interface; not exposed to the Agent.",
+    {"unified_diff": {"type": "string"}, "expected_tree_hash": {"type": "string"}},
+    ["unified_diff", "expected_tree_hash"])
+
 
 class ToolInputError(ValueError):
-    pass
+    def __init__(self, message, code="invalid_tool_input"):
+        super().__init__(message)
+        self.code = code
 
 
 class CodeTools:
-    def __init__(self, base, artifact_dir, task):
+    def __init__(self, base, artifact_dir, task, *, allow_legacy_patch=False):
         self.base, self.root, self.task = Path(base), Path(artifact_dir), task
         self.root.mkdir(parents=True)
         self.current = self.base
         self.files = manifest(self.base)
+        self.base_files = self.files.copy()
+        self.base_tree = tree_hash(self.base_files)
+        self.schemas = TOOLS + ([LEGACY_PATCH_TOOL] if allow_legacy_patch else [])
         self.tree = tree_hash(self.files)
         self.proposals = 0
         self.patch = None
@@ -73,7 +89,7 @@ class CodeTools:
         return value
 
     def invoke(self, name, args):
-        schemas = {item["function"]["name"]: item["function"]["parameters"] for item in TOOLS}
+        schemas = {item["function"]["name"]: item["function"]["parameters"] for item in self.schemas}
         try:
             if name not in schemas:
                 raise ToolInputError("Unknown tool; shell/network/host writes are not available.")
@@ -86,10 +102,13 @@ class CodeTools:
                     raise ToolInputError(f"{key} must be text.")
                 if expected == "integer" and type(value) is not int:
                     raise ToolInputError(f"{key} must be an integer.")
+                if expected == "array" and not isinstance(value, list):
+                    raise ToolInputError(f"{key} must be an array.")
             result = getattr(self, "_" + name)(args)
             return {"ok": True, "tree_hash": self.tree, **result}
         except ToolInputError as exc:
-            return {"ok": False, "error_code": "invalid_tool_input", "message": str(exc), "retryable": True}
+            return {"ok": False, "error_code": exc.code, "message": str(exc),
+                    "tree_hash": self.tree, "retryable": True}
         except VerificationError as exc:
             if exc.status in ("POLICY_REJECTED", "SYSTEM_ERROR"):
                 raise
@@ -109,10 +128,12 @@ class CodeTools:
         end = self._limit(args, "end_line", start + 159, high=100200)
         if end < start or end - start >= 200:
             raise ToolInputError("Read at most 200 lines in ascending order.")
-        lines = self._text(args["path"]).splitlines()
+        text = self._text(args["path"])
+        lines = text.splitlines()
         output = "\n".join(f"{index + start}: {line}" for index, line in enumerate(lines[start - 1:end]))
         return {"path": args["path"], "file_sha256": self.files[args["path"]]["sha256"],
-                "content": output[:12000], "total_lines": len(lines), "truncated": len(output) > 12000}
+                "content": output[:12000], "total_lines": len(lines), "truncated": len(output) > 12000,
+                "ends_with_newline": text.endswith("\n")}
 
     def _search_code(self, args):
         query = args["query"]
@@ -153,10 +174,86 @@ class CodeTools:
                         return {"definitions": matches, "truncated": True, "resolution": "syntax_only"}
         return {"definitions": matches, "truncated": False, "resolution": "syntax_only"}
 
+    def _check_edit_tree(self, expected):
+        if self.submitted:
+            raise ToolInputError("Candidate is frozen; wait for verification feedback.", "candidate_frozen")
+        if expected != self.tree:
+            raise ToolInputError("Stale tree hash; read current files before editing again.", "stale_tree_hash")
+        self._check_snapshots()
+
+    def _check_snapshots(self):
+        if tree_hash(manifest(self.current)) != self.tree or tree_hash(manifest(self.base)) != self.base_tree:
+            raise VerificationError("SYSTEM_ERROR", "workspace_changed", "Base or current snapshot changed.")
+
+    def _edit_files(self, args):
+        self._check_edit_tree(args["expected_tree_hash"])
+        edits = args["edits"]
+        if not 1 <= len(edits) <= 30:
+            raise ToolInputError("Provide 1 to 30 file edits.")
+        try:
+            input_size = len(json.dumps(args, ensure_ascii=False).encode("utf-8"))
+        except (TypeError, ValueError, UnicodeEncodeError):
+            raise ToolInputError("Edits must contain valid UTF-8 JSON data.") from None
+        if input_size > 262144:
+            raise ToolInputError("Structured edit input exceeds 256 KiB.", "edit_size")
+        updates = {}
+        fields = {"path", "expected_file_sha256", "old_text", "new_text"}
+        for edit in edits:
+            if not isinstance(edit, dict) or set(edit) != fields or any(not isinstance(v, str) for v in edit.values()):
+                raise ToolInputError("Each edit requires exactly path, expected_file_sha256, old_text and new_text strings.")
+            name = edit["path"]
+            try:
+                safe_relative(name)
+            except VerificationError as exc:
+                raise VerificationError("POLICY_REJECTED", "unsafe_edit_path", "Unsafe edit path.") from exc
+            if not allowed_source(name, self.task.editable_paths):
+                raise VerificationError("POLICY_REJECTED", "protected_path", name)
+            if name not in self.base_files or name not in self.files:
+                raise ToolInputError("Edit only existing baseline and current files.", "missing_edit_file")
+            if name in updates:
+                raise ToolInputError("Use one edit per file; include enough context for all changes.", "duplicate_edit_path")
+            if edit["expected_file_sha256"] != self.files[name]["sha256"]:
+                raise ToolInputError(f"Stale file hash for {name}; read the current file.", "stale_file_hash")
+            old, new = edit["old_text"], edit["new_text"]
+            if not old or old == new:
+                raise ToolInputError("old_text must be nonempty and different from new_text.", "no_edit_change")
+            if any(char in old + new for char in ("\x00", "\r")):
+                raise ToolInputError("Use exact UTF-8/LF text without NUL or CR characters.")
+            text = self._text(name)
+            if "\r" in text:
+                raise ToolInputError("Editable source must use LF newlines.", "unsupported_source_newlines")
+            start = text.find(old)
+            if start < 0:
+                raise ToolInputError(f"old_text not found in {name}; read it again.", "edit_not_found")
+            if text.find(old, start + 1) >= 0:
+                raise ToolInputError(f"old_text is ambiguous in {name}; include more context.", "ambiguous_edit")
+            updates[name] = (text[:start] + new + text[start + len(old):]).encode("utf-8")
+        expected_files = self.files.copy()
+        for name, data in updates.items():
+            expected_files[name] = {"sha256": digest(data), "size": len(data)}
+        chunks = []
+        for name in sorted(self.base_files.keys() | expected_files.keys()):
+            if self.base_files.get(name) == expected_files.get(name):
+                continue
+            before = (self.base / name).read_bytes() if name in self.base_files else b""
+            after = updates.get(name)
+            if after is None:
+                after = (self.current / name).read_bytes() if name in self.files else b""
+            try:
+                chunks.append(file_diff(name, before.decode("utf-8"), after.decode("utf-8"),
+                                        existed=name in self.base_files, exists=name in expected_files))
+            except UnicodeDecodeError:
+                raise ToolInputError("Changed source must be UTF-8 text.") from None
+        data = "".join(chunks).encode("utf-8")
+        if not data:
+            raise ToolInputError("Edits produce no cumulative change from the baseline.", "no_edit_change")
+        return self._publish_patch(data, request=args, expected_files=expected_files)
+
     def _propose_patch(self, args):
-        if args["expected_tree_hash"] != self.tree or tree_hash(manifest(self.current)) != self.tree:
-            raise ToolInputError("Stale tree hash; read current files before proposing again.")
-        data = args["unified_diff"].replace("\r\n", "\n").encode("utf-8")
+        self._check_edit_tree(args["expected_tree_hash"])
+        return self._publish_patch(args["unified_diff"].replace("\r\n", "\n").encode("utf-8"))
+
+    def _publish_patch(self, data, *, request=None, expected_files=None):
         if len(data) > 262144:
             raise VerificationError("POLICY_REJECTED", "patch_size", "Patch exceeds 256 KiB.")
         self.proposals += 1
@@ -164,7 +261,12 @@ class CodeTools:
         proposal.mkdir()
         patch = proposal / "changes.patch"
         patch.write_bytes(data)
+        if request is not None:
+            (proposal / "edit-request.json").write_text(json.dumps(request, ensure_ascii=False, indent=2), encoding="utf-8")
         files, policy = apply_candidate(self.base, proposal / "source", patch, self.task)
+        if expected_files is not None and files != expected_files:
+            raise VerificationError("SYSTEM_ERROR", "generated_patch_mismatch", "Generated patch did not reproduce the expected tree.")
+        self._check_snapshots()
         self.current, self.files, self.patch = proposal / "source", files, patch
         self.tree, self.submitted = tree_hash(files), False
         return {"candidate_tree_sha256": self.tree, "patch_sha256": digest(patch.read_bytes()),

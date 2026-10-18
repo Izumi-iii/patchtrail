@@ -45,6 +45,10 @@ class Store:
                     PRIMARY KEY (conversation_id, request_id)
                 );
             """)
+            columns = {row[1] for row in db.execute("PRAGMA table_info(conversations)")}
+            for name, default in (("task_source", "demo"), ("task_path", "")):
+                if name not in columns:
+                    db.execute(f"ALTER TABLE conversations ADD COLUMN {name} TEXT NOT NULL DEFAULT '{default}'")
 
     @contextmanager
     def connect(self):
@@ -61,9 +65,9 @@ class Store:
         item = dict(id=uuid.uuid4().hex, title="新会话", repository_path="",
                     created_at=now(), updated_at=now())
         with self.connect() as db:
-            db.execute("INSERT INTO conversations VALUES (:id,:title,:repository_path,"
+            db.execute("INSERT INTO conversations(id,title,repository_path,created_at,updated_at) VALUES (:id,:title,:repository_path,"
                        ":created_at,:updated_at)", item)
-        return {**item, "message_count": 0, "messages": []}
+        return self.get(item["id"])
 
     def list(self):
         with self.connect() as db:

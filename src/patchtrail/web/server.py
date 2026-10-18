@@ -10,6 +10,8 @@ from urllib.parse import urlsplit
 
 from .service import RequestError, Workbench
 from .store import Store
+from .jobs import Jobs
+from patchtrail.domain.task import VerificationError
 
 STATIC_ROOT = Path(__file__).with_name("static")
 ROUTES = {"/": ("index.html", "text/html; charset=utf-8"),
@@ -21,8 +23,9 @@ ROUTES = {"/": ("index.html", "text/html; charset=utf-8"),
 class LocalServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, address, store):
-        self.workbench = Workbench(store)
+    def __init__(self, address, store, jobs=None):
+        self.jobs = jobs if jobs is not None else Jobs(store)
+        self.workbench = Workbench(store, self.jobs)
         super().__init__(address, Handler)
 
 
@@ -94,9 +97,25 @@ class Handler(BaseHTTPRequestHandler):
             name, kind = ROUTES[path]
             return self.respond(200, (STATIC_ROOT / name).read_bytes(), kind)
         if self.command == "GET" and path == "/api/healthz":
-            return self.respond(200, {"status": "ok", "mode": "workbench_preview",
-                                      "agent_connected": False, "tests_available": False,
-                                      "repository_inspection": True})
+            return self.respond(200, {"status": "ok", "mode": "agent_workbench",
+                                      "agent_connected": True, "tests_available": True,
+                                      "repository_inspection": True, "model": self.server.jobs.capabilities()})
+        match = re.fullmatch(r"/api/conversations/([a-f0-9]{32})/(jobs|task)", path)
+        if match:
+            identity, endpoint = match.groups()
+            if endpoint == "jobs" and self.command == "GET":
+                return self.respond(200, {"jobs": self.server.jobs.list(identity)})
+            if endpoint == "task" and self.command == "POST":
+                return self.respond(200, self.server.jobs.configure(identity, self._body()))
+        match = re.fullmatch(r"/api/jobs/(job-[a-f0-9]{32})(/diff|/actions)?", path)
+        if match:
+            identity, suffix = match.groups()
+            if self.command == "GET" and suffix is None:
+                return self.respond(200, self.server.jobs.public(identity))
+            if self.command == "GET" and suffix == "/diff":
+                return self.respond(200, self.server.jobs.diff(identity))
+            if self.command == "POST" and suffix == "/actions":
+                return self.respond(200, self.server.jobs.action(identity, self._body()))
         if path == "/api/conversations":
             if self.command == "GET":
                 return self.respond(200, {"conversations": store.list()})
@@ -127,6 +146,8 @@ class Handler(BaseHTTPRequestHandler):
             self.respond(404, {"error": "会话不存在，可能已在其他页面删除。"})
         except RequestError as exc:
             self.respond(exc.status, {"error": str(exc)})
+        except VerificationError as exc:
+            self.respond(409, {"error": str(exc), "reason_code": exc.reason})
         except Exception:
             logging.exception("Workbench request failed")
             self.respond(500, {"error": "服务暂时出错，请保留输入并重试。"})
@@ -148,7 +169,7 @@ def main():
     except OSError as exc:
         parser.exit(1, f"Cannot start server: {exc}\nUse --port to select another port.\n")
     print(f"PatchTrail: http://127.0.0.1:{server.server_port}", flush=True)
-    print("Local workbench preview. Model repair and test execution are not connected.", flush=True)
+    print("Local Agent workbench. Repair submissions use the configured model and may incur charges.", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -44,7 +44,7 @@ class AgentFixture:
 class ToolsTests(AgentFixture, unittest.TestCase):
     def setUp(self):
         super().setUp()
-        self.tools = CodeTools(self.base, self.root / "proposals", self.task)
+        self.tools = CodeTools(self.base, self.root / "proposals", self.task, allow_legacy_patch=True)
 
     def test_bounded_file_search_read_and_ast(self):
         listing = self.tools.invoke("list_files", {"limit": 1})
@@ -145,9 +145,10 @@ class ScriptedModel:
     """Test-only deterministic calls, never available as a production fallback."""
     is_real_model = False
 
-    def __init__(self, patch_text, wrong_first=None):
-        self.patch_text = patch_text
+    def __init__(self, replacement="original - discount", wrong_first=None):
+        self.replacement = replacement
         self.wrong_first = wrong_first
+        self.current_expression = "original"
         self.calls = 0
         self.proposals = 0
         self.seen_messages = []
@@ -156,6 +157,8 @@ class ScriptedModel:
         return {"provider": "scripted-test", "model": "deterministic-fixture"}
 
     def invoke(self, messages, tools):
+        assert "edit_files" in {tool["function"]["name"] for tool in tools}
+        assert "propose_patch" not in {tool["function"]["name"] for tool in tools}
         self.calls += 1
         self.seen_messages.append(json.loads(json.dumps(messages)))
         if self.calls == 1:
@@ -166,12 +169,17 @@ class ScriptedModel:
             last = messages[-1]
             payload = json.loads(last["content"])
             if last["role"] == "tool" and "candidate_tree_sha256" in payload:
+                self.current_expression = self.pending_expression
                 name, args = "submit_candidate", {"candidate_tree_sha256": payload["candidate_tree_sha256"]}
-            else:
+            elif "file_sha256" in payload:
                 self.proposals += 1
-                text = self.wrong_first if self.proposals == 1 and self.wrong_first else self.patch_text
-                tree = payload.get("current_tree_hash") or payload.get("tree_hash")
-                name, args = "propose_patch", {"unified_diff": text, "expected_tree_hash": tree}
+                self.pending_expression = self.wrong_first if self.proposals == 1 and self.wrong_first else self.replacement
+                name, args = "edit_files", {"expected_tree_hash": payload["tree_hash"], "edits": [{
+                    "path": "shop/refund.py", "expected_file_sha256": payload["file_sha256"],
+                    "old_text": f"    return {self.current_expression}\n",
+                    "new_text": f"    return {self.pending_expression}\n"}]}
+            else:
+                name, args = "read_file", {"path": "shop/refund.py"}
         return {"content": "test fixture action", "tool_calls": [{"id": f"call-{self.calls}", "name": name, "args": args}],
                 "usage": None, "finish_reason": "tool_calls"}
 
@@ -179,7 +187,7 @@ class ScriptedModel:
 @unittest.skipUnless(HAS_AGENT, "Run framework tests with the project agent .venv")
 class GraphTests(AgentFixture, unittest.TestCase):
     def run_graph(self, model=None, backend=None, budget=None):
-        self.model = model or ScriptedModel(self.correct)
+        self.model = model or ScriptedModel()
         return AgentRunner(self.root / "agent-runs", self.model, backend=backend or FakeBackend(), budget=budget).run(self.task)
 
     def test_graph_success_is_scripted_and_terminal_verifier_decides(self):
@@ -193,7 +201,7 @@ class GraphTests(AgentFixture, unittest.TestCase):
             self.assertNotIn("holdout", json.dumps(messages).lower())
 
     def test_model_cannot_declare_success_without_a_candidate(self):
-        model = ScriptedModel(self.correct)
+        model = ScriptedModel()
         model.invoke = lambda messages, tools: {"content": "PASSED, all tests passed", "tool_calls": []}
         result = self.run_graph(model=model, budget=AgentBudget(max_model_calls=2))
         self.assertEqual(result["status"], "BUDGET_EXHAUSTED", result)
@@ -260,6 +268,9 @@ class AdapterHTTPTests(unittest.TestCase):
             self.assertEqual(response["tool_calls"][0]["id"], "transport-1")
             self.assertEqual(requests[0]["thinking"], {"type": "disabled"})
             self.assertEqual(requests[0]["max_tokens"], 4096)
+            schemas = {t["function"]["name"]: t["function"]["parameters"] for t in requests[0]["tools"]}
+            self.assertNotIn("propose_patch", schemas)
+            self.assertFalse(schemas["edit_files"]["properties"]["edits"]["items"]["additionalProperties"])
             self.assertEqual(response["usage"]["total_tokens"], 15)
             messages += [{"role": "assistant", "content": "", "tool_calls": response["tool_calls"]},
                          {"role": "tool", "tool_call_id": "transport-1", "content": "{}"}]
@@ -275,7 +286,7 @@ class AdapterHTTPTests(unittest.TestCase):
                      "Scripted graph + real Docker requires agent dependencies and explicit Docker tests")
 class RealDockerGraphTests(AgentFixture, unittest.TestCase):
     def test_wrong_then_correct_candidate_retries_without_holdout_feedback(self):
-        model = ScriptedModel(self.correct, wrong_first=self.wrong)
+        model = ScriptedModel(wrong_first="original + discount")
         output = ROOT / ".test-artifacts" / "agent"
         result = AgentRunner(output / "runs", model).run(self.task)
         output.mkdir(parents=True, exist_ok=True)

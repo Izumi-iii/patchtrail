@@ -189,7 +189,7 @@ class HTTPTests(unittest.TestCase):
             self.assertEqual(status, 200)
             self.assertTrue(body)
             self.assertIn("frame-ancestors 'none'", headers["Content-Security-Policy"])
-        self.assertFalse(self.request("/api/healthz")[1]["agent_connected"])
+        self.assertTrue(self.request("/api/healthz")[1]["agent_connected"])
         for path in ("/.git/config", "/Docs/PROJECT_DESIGN.md", "/../app.py"):
             self.assertEqual(self.request(path)[0], 404)
 
@@ -212,6 +212,34 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(self.request("/api/healthz", headers={"Host": "attacker.example"})[0], 403)
         self.assertEqual(self.request("/api/conversations", "POST", {},
                                       {"X-PatchTrail": ""})[0], 403)
+        job = "job-" + "a" * 32
+        self.assertEqual(self.request(f"/api/jobs/{job}/actions", "POST", {"action": "apply"},
+                                     {"Origin": "https://untrusted.example"})[0], 403)
+
+    def test_task_configuration_job_lists_and_unknown_job_are_guarded(self):
+        _, item, _ = self.request("/api/conversations", "POST", {})
+        path = "/api/conversations/" + item["id"]
+        self.assertEqual(self.request(path + "/jobs")[1], {"jobs": []})
+        self.assertEqual(self.request(path + "/task", "POST", {"task_source": "demo"})[1]["task_source"], "demo")
+        self.assertEqual(self.request(path + "/task", "POST", {"task_source": "file", "task_path": "relative.json"})[0], 400)
+        self.assertEqual(self.request("/api/jobs/job-" + "b" * 32)[0], 404)
+
+    def test_http_repair_retry_is_idempotent_without_starting_a_paid_worker(self):
+        _, item, _ = self.request("/api/conversations", "POST", {})
+        path = "/api/conversations/" + item["id"]
+        jobs = self.server.jobs
+        with patch.object(jobs, "require_model", False), patch.object(jobs, "launcher") as launch:
+            payload = {"mode": "repair", "content": "Fix refund", "request_id": "repair-http"}
+            first = self.request(path + "/messages", "POST", payload)
+            second = self.request(path + "/messages", "POST", payload)
+            self.assertEqual(first[0], 200)
+            self.assertEqual(first[1], second[1])
+            self.assertEqual(launch.call_count, 1)
+            identity = first[1]["messages"][-1]["metadata"]["job_id"]
+            self.assertEqual(self.request(f"/api/jobs/{identity}/diff")[0], 409)
+            # Leave this shared HTTP test server without an active task.
+            row = jobs.row(identity)
+            jobs.finish(identity, row["attempt"], "FAILED")
 
     def test_non_object_and_oversized_input(self):
         self.assertEqual(self.request("/api/conversations", "POST", [1, 2])[0], 400)

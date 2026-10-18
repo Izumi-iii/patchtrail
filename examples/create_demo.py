@@ -3,6 +3,7 @@
 import argparse
 import json
 import subprocess
+import os
 from pathlib import Path
 
 
@@ -17,8 +18,11 @@ def create_demo(destination, image="patchtrail-pytest:0.1"):
         "def refund_amount(original, discount=0):\n    return original\n", encoding="utf-8", newline="\n")
 
     def git(*args):
-        return subprocess.run(["git", "-c", "core.hooksPath=", "-C", str(repository), *args],
-                              check=True, capture_output=True).stdout.decode().strip()
+        environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+        environment.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+        return subprocess.run(["git", "-c", "core.hooksPath=", "-c", "core.autocrlf=false",
+                               "-c", "commit.gpgsign=false", "-C", str(repository), *args],
+                              check=True, capture_output=True, env=environment, timeout=20).stdout.decode().strip()
 
     git("init", "--quiet", "--template=")
     git("add", ".")

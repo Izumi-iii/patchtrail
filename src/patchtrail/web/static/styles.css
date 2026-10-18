@@ -127,3 +127,54 @@ dialog small { display:block; font-size:10px; line-height:1.8; color:#939c8c; ma
   .message-actions { padding-left:0; } .message-content { font-size:12px; }
 }
 @media(prefers-reduced-motion:reduce) { *,*::before,*::after { animation:none !important; scroll-behavior:auto !important; } }
+
+/* Conversation-first workbench; execution stays inside the assistant turn. */
+:root { --ink:#25272b; --muted:#747980; --line:#e5e8ec; --green:#356bd5; }
+body,.workspace { background:#fafbfc; }
+.sidebar { background:#fff; border-color:#edf0f3; }
+.brand-mark { background:linear-gradient(135deg,#5485ec,#5ba9b5); }
+.brand-mark span { color:#d8e8ff; }
+.new-chat { background:#f0f2f5; border:0; border-radius:24px; }
+.conversation-item { border-radius:20px; }
+.conversation-item:hover,.conversation-item.active { background:#edf2fb; border-color:transparent; }
+.workspace:has(#welcome:not([hidden])) { background:radial-gradient(ellipse at 55% 48%,#e4f0ff 0, #f5f8fc 48%,#fafbfc 76%); }
+.welcome { text-align:center; }
+.welcome h1 { font-size:clamp(26px,3vw,42px); font-weight:450; }
+.eyebrow { color:#6a80a8; letter-spacing:2px; }
+.suggestion { background:#ffffffac; border-color:#e5eaf2; border-radius:18px; }
+.suggestion:hover { background:#fff; border-color:#bdcfee; }
+.suggestion>span { color:#5b7bad; }
+.preview-tag,.message-preview-label { color:#5776a5; background:#f0f4fa; border-color:#e0e8f2; }
+.composer { border-radius:28px; border-color:#e8ecf3; padding:18px 20px 12px; box-shadow:0 5px 22px #5b739015; }
+.composer textarea { font-size:15px; }
+.composer:focus-within { border-color:#b6cbed; box-shadow:0 5px 22px #5b739015,0 0 0 2px #e8effa; }
+.composer textarea:focus-visible { outline:none; }
+.repository-button { background:transparent; border:0; font-size:12px; border-radius:16px; }
+.repository-button.connected { color:#5275a6; background:#f2f5fb; border:0; }
+.send-button { background:#356bd5; }
+.task-hint { color:#7c8490; font-size:10px; text-align:center; margin:10px 6px 0; overflow-wrap:anywhere; }
+.user .message-content { background:#eaf0fa; }
+.message-header strong { color:#3a4b67; }
+.job-card { margin:15px 0 0 25px; border:1px solid #e1e7f0; border-radius:16px; padding:18px; background:#fff; font-size:12px; overflow-wrap:anywhere; }
+.job-card>strong { color:#355781; font-size:14px; }
+.job-card>p { line-height:1.8; margin:9px 0; color:#727e8e; }
+.job-card[data-state="FAILED"]>strong,.job-card .job-error { color:#a24b46; }
+.job-card[data-state="APPLIED"]>strong { color:#237359; }
+.job-checks { display:flex; flex-wrap:wrap; gap:12px; color:#32705b; padding:10px 0; }
+.job-timeline { color:#8590a1; font-size:11px; line-height:1.9; border-left:2px solid #e4ebf5; padding-left:12px; margin:10px 0; }
+.job-actions { display:flex; gap:7px; flex-wrap:wrap; padding-top:8px; }
+.job-actions button { color:#3e679b; border:1px solid #dce5f1; border-radius:18px; padding:8px 13px; background:#f7faff; }
+.job-actions button:disabled { opacity:.4; }
+.diff-dialog { width:min(1000px,94vw); max-width:1000px; }
+.diff-dialog pre { text-align:left; max-height:54vh; overflow:auto; white-space:pre; padding:20px; background:#f3f6fa; border-radius:12px; font:12px/1.8 Consolas,monospace; }
+.mono { font:11px/1.7 Consolas,monospace; overflow-wrap:anywhere; white-space:pre-wrap; color:#7e8998; }
+#task-source { display:block; max-width:100%; width:100%; border:1px solid #dce3ec; padding:10px; margin:10px 0 20px; border-radius:8px; font-size:13px; }
+.task-cost { font-size:12px; }
+@media(max-width:700px) {
+  .composer-right { gap:4px; }
+  .composer-right .plain-button { padding:5px 4px; font-size:10px; }
+  .repository-button { max-width:38%; font-size:10px; padding:5px 0; }
+  .job-card { margin-left:0; padding:14px; }
+  .welcome h1 { font-size:27px; }
+  .diff-dialog .dialog-actions { align-items:flex-start; gap:8px; font-size:10px; }
+}
